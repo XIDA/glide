@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace League\Glide;
 
 use InvalidArgumentException;
-use League\Flysystem\FileExistsException;
-use League\Flysystem\FilesystemInterface;
+use League\Flysystem\FilesystemException as FSException;
+use League\Flysystem\FilesystemOperator;
 use League\Glide\Api\ApiInterface;
 use League\Glide\Filesystem\FileNotFoundException;
 use League\Glide\Filesystem\FilesystemException;
@@ -16,7 +16,7 @@ class Server
 {
     /**
      * Source file system.
-     * @var FilesystemInterface
+     * @var FilesystemOperator
      */
     protected $source;
 
@@ -28,7 +28,7 @@ class Server
 
     /**
      * Cache file system.
-     * @var FilesystemInterface
+     * @var FilesystemOperator
      */
     protected $cache;
 
@@ -82,11 +82,11 @@ class Server
 
     /**
      * Create Server instance.
-     * @param FilesystemInterface $source Source file system.
-     * @param FilesystemInterface $cache  Cache file system.
+     * @param FilesystemOperator $source Source file system.
+     * @param FilesystemOperator $cache  Cache file system.
      * @param ApiInterface        $api    Image manipulation API.
      */
-    public function __construct(FilesystemInterface $source, FilesystemInterface $cache, ApiInterface $api)
+    public function __construct(FilesystemOperator $source, FilesystemOperator $cache, ApiInterface $api)
     {
         $this->setSource($source);
         $this->setCache($cache);
@@ -95,19 +95,19 @@ class Server
 
     /**
      * Set source file system.
-     * @param FilesystemInterface $source Source file system.
+     * @param FilesystemOperator $source Source file system.
      * @return void
      */
-    public function setSource(FilesystemInterface $source): void
+    public function setSource(FilesystemOperator $source): void
     {
         $this->source = $source;
     }
 
     /**
      * Get source file system.
-     * @return FilesystemInterface Source file system.
+     * @return FilesystemOperator Source file system.
      */
-    public function getSource(): FilesystemInterface
+    public function getSource(): FilesystemOperator
     {
         return $this->source;
     }
@@ -165,7 +165,7 @@ class Server
      */
     public function sourceFileExists(string $path): bool
     {
-        return $this->source->has($this->getSourcePath($path));
+        return $this->source->fileExists($this->getSourcePath($path));
     }
 
     /**
@@ -189,19 +189,19 @@ class Server
 
     /**
      * Set cache file system.
-     * @param FilesystemInterface $cache Cache file system.
+     * @param FilesystemOperator $cache Cache file system.
      * @return void
      */
-    public function setCache(FilesystemInterface $cache): void
+    public function setCache(FilesystemOperator $cache): void
     {
         $this->cache = $cache;
     }
 
     /**
      * Get cache file system.
-     * @return FilesystemInterface Cache file system.
+     * @return FilesystemOperator Cache file system.
      */
-    public function getCache(): FilesystemInterface
+    public function getCache(): FilesystemOperator
     {
         return $this->cache;
     }
@@ -306,7 +306,7 @@ class Server
      */
     public function cacheFileExists(string $path, array $params): bool
     {
-        return $this->cache->has(
+        return $this->cache->fileExists(
             $this->getCachePath($path, $params)
         );
     }
@@ -314,9 +314,9 @@ class Server
     /**
      * Delete cached manipulations for an image.
      * @param  string $path Image path.
-     * @return bool   Whether the delete succeeded.
+     * @return void   Whether the delete succeeded.
      */
-    public function deleteCache(string $path): bool
+    public function deleteCache(string $path): void
     {
         if (!$this->groupCacheInFolders) {
             throw new InvalidArgumentException(
@@ -324,7 +324,7 @@ class Server
             );
         }
 
-        return $this->cache->deleteDir(
+        $this->cache->deleteDirectory(
             dirname($this->getCachePath($path))
         );
     }
@@ -456,15 +456,17 @@ class Server
     {
         $path = $this->makeImage($path, $params);
 
-        $source = $this->cache->read($path);
-
-        if ($source === false) {
+        try {
+            $source = $this->cache->read($path);
+        } catch (FSException $e) {
             throw new FilesystemException(
-                'Could not read the image `' . $path . '`.'
+                'Could not read the image `' . $path . '`.',
+                0,
+                $e
             );
         }
 
-        return 'data:' . $this->cache->getMimetype($path) . ';base64,' . base64_encode($source);
+        return 'data:' . $this->cache->mimetype($path) . ';base64,' . base64_encode($source);
     }
 
     /**
@@ -478,8 +480,8 @@ class Server
     {
         $path = $this->makeImage($path, $params);
 
-        header('Content-Type:' . $this->cache->getMimetype($path));
-        header('Content-Length:' . $this->cache->getSize($path));
+        header('Content-Type:' . $this->cache->mimeType($path));
+        header('Content-Length:' . $this->cache->fileSize($path));
         header('Cache-Control:' . 'max-age=31536000, public');
         header('Expires:' . date_create('+1 years')->format('D, d M Y H:i:s') . ' GMT');
 
@@ -515,13 +517,15 @@ class Server
             );
         }
 
-        $source = $this->source->read(
-            $sourcePath
-        );
-
-        if ($source === false) {
+        try {
+            $source = $this->source->read(
+                $sourcePath
+            );
+        } catch (FSException $e) {
             throw new FilesystemException(
-                'Could not read the image `' . $sourcePath . '`.'
+                'Could not read the image `' . $sourcePath . '`.',
+                0,
+                $e
             );
         }
 
@@ -537,20 +541,16 @@ class Server
         }
 
         try {
-            $write = $this->cache->write(
+            $this->cache->write(
                 $cachedPath,
                 $this->api->run($tmp, $this->getAllParams($params))
             );
-
-            if ($write === false) {
-                throw new FilesystemException(
-                    'Could not write the image `' . $cachedPath . '`.'
-                );
-            }
-        } catch (FileExistsException $exception) {
-            // This edge case occurs when the target already exists
-            // because it's currently be written to disk in another
-            // request. It's best to just fail silently.
+        } catch (FSException $e) {
+            throw new FilesystemException(
+                'Could not write the image `' . $cachedPath . '`',
+                0,
+                $e
+            );
         } finally {
             unlink($tmp);
         }
