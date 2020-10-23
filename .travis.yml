@@ -7,6 +7,7 @@ env:
 php:
   - 7.2
   - 7.4
+  - 'nightly'
 
 env:
   global:
@@ -25,11 +26,13 @@ cache:
   directories:
     - $HOME/.composer/cache
 
-before_install:
-  - travis_retry composer self-update
-
 install:
-  - travis_retry composer update --no-interaction --prefer-source
+  - |
+      if [[ $TRAVIS_PHP_VERSION == 'nightly' ]]; then
+        composer update --no-interaction --ignore-platform-reqs
+      else
+        composer update --no-interaction
+      fi
   - if [[ $STATIC_ANALYSIS == 1 ]]; then composer require --dev psalm/phar:^3.13; fi
 
 script:
